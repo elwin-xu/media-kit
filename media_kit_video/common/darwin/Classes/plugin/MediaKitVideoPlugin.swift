@@ -179,7 +179,9 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       else {
         return result(false)
       }
-      result(pip.start())
+      let args = arguments as? [String: Any]
+      let moveAppToBackground = args?["moveAppToBackground"] as? Bool ?? false
+      result(pip.start(moveAppToBackground: moveAppToBackground))
     }
 
     private func handlePipStopMethodCall(

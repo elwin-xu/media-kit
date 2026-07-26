@@ -110,12 +110,18 @@ class PictureInPicture {
   }
 
   /// Enters PiP now (e.g. from an in-app button). Requires [enable] first.
-  Future<bool> start() async {
+  ///
+  /// When [moveAppToBackground] is true, the app is sent to the home screen
+  /// once PiP starts, so the window floats over it (like tapping the home
+  /// button). Note: this uses a private-API workaround — iOS has no public
+  /// way to background an app programmatically.
+  Future<bool> start({bool moveAppToBackground = false}) async {
     if (!_available || _handle == null) {
       return false;
     }
     final started = await _channel.invokeMethod('PictureInPicture.Start', {
       'handle': _handle.toString(),
+      'moveAppToBackground': moveAppToBackground,
     });
     return started == true;
   }

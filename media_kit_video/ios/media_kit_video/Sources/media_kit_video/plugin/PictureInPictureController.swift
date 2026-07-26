@@ -50,6 +50,8 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
   private var duration: Double = 0
 
   private var pendingStart: Bool = false
+  private var suspendOnStart: Bool = false
+  private var autoEnterDesired: Bool = false
   private var disposed: Bool = false
   private var lifecycleObservers: [NSObjectProtocol] = []
 
@@ -94,29 +96,13 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
       handle, autoEnter, audioSession.category.rawValue, audioSession.mode.rawValue
     )
 
-    let contentSource = AVPictureInPictureController.ContentSource(
-      sampleBufferDisplayLayer: displayLayer,
-      playbackDelegate: self
-    )
-    let pipController = AVPictureInPictureController(contentSource: contentSource)
-    pipController.delegate = self
-    pipController.canStartPictureInPictureAutomaticallyFromInline = autoEnter
-    self.pipController = pipController
-
-    // isPictureInPicturePossible becomes true asynchronously; honor a start()
-    // that raced ahead of it.
-    possibleObservation = pipController.observe(
-      \.isPictureInPicturePossible, options: [.initial, .new]
-    ) { [weak self] pipController, _ in
-      guard let that = self else { return }
-      let possible = pipController.isPictureInPicturePossible
-      NSLog("[MKPiP] isPictureInPicturePossible=%d (pendingStart=%d)", possible, that.pendingStart)
-      that.emit("PictureInPicture.OnPossibleChanged", ["possible": possible])
-      if that.pendingStart, possible {
-        that.pendingStart = false
-        NSLog("[MKPiP] starting PiP (deferred)")
-        pipController.startPictureInPicture()
-      }
+    // Only keep an AVPictureInPictureController alive while it is wanted: the
+    // system can auto-start PiP for an existing controller when the app
+    // backgrounds, so with auto-enter off none must exist. The button path
+    // creates one on demand (see start()).
+    autoEnterDesired = autoEnter
+    if autoEnter {
+      createPipController()
     }
 
     // Diagnostics for background playback: whether the audio session is in a
@@ -139,8 +125,11 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
   private func logLifecycleSnapshot(_ tag: String) {
     let session = AVAudioSession.sharedInstance()
     NSLog(
-      "[MKPiP] %@: pipActive=%d possible=%d layerStatus=%ld layerError=%@ session category=%@ mode=%@ otherAudio=%d",
+      "[MKPiP] %@: controller=%d autoEnter=%d canStartAuto=%d pipActive=%d possible=%d layerStatus=%ld layerError=%@ session category=%@ mode=%@ otherAudio=%d",
       tag,
+      pipController != nil,
+      autoEnterDesired,
+      pipController?.canStartPictureInPictureAutomaticallyFromInline ?? false,
       pipController?.isPictureInPictureActive ?? false,
       pipController?.isPictureInPicturePossible ?? false,
       displayLayer.status.rawValue,
@@ -239,18 +228,76 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
 
   // MARK: - Control (main thread)
 
-  public func setAutoEnter(_ autoEnter: Bool) {
-    NSLog("[MKPiP] setAutoEnter=%d", autoEnter)
-    pipController?.canStartPictureInPictureAutomaticallyFromInline = autoEnter
+  private func createPipController() {
+    if pipController != nil {
+      return
+    }
+    NSLog("[MKPiP] creating AVPictureInPictureController")
+    let contentSource = AVPictureInPictureController.ContentSource(
+      sampleBufferDisplayLayer: displayLayer,
+      playbackDelegate: self
+    )
+    let pipController = AVPictureInPictureController(contentSource: contentSource)
+    pipController.delegate = self
+    pipController.canStartPictureInPictureAutomaticallyFromInline = autoEnterDesired
+    self.pipController = pipController
+
+    // isPictureInPicturePossible becomes true asynchronously; honor a start()
+    // that raced ahead of it.
+    possibleObservation = pipController.observe(
+      \.isPictureInPicturePossible, options: [.initial, .new]
+    ) { [weak self] pipController, _ in
+      guard let that = self else { return }
+      let possible = pipController.isPictureInPicturePossible
+      NSLog("[MKPiP] isPictureInPicturePossible=%d (pendingStart=%d)", possible, that.pendingStart)
+      that.emit("PictureInPicture.OnPossibleChanged", ["possible": possible])
+      if that.pendingStart, possible {
+        that.pendingStart = false
+        NSLog("[MKPiP] starting PiP (deferred)")
+        pipController.startPictureInPicture()
+      }
+    }
   }
 
-  public func start() -> Bool {
+  private func destroyPipController() {
+    if pipController == nil {
+      return
+    }
+    NSLog("[MKPiP] destroying AVPictureInPictureController")
+    pendingStart = false
+    suspendOnStart = false
+    possibleObservation?.invalidate()
+    possibleObservation = nil
+    pipController?.contentSource = nil
+    pipController = nil
+  }
+
+  public func setAutoEnter(_ autoEnter: Bool) {
+    NSLog("[MKPiP] setAutoEnter=%d", autoEnter)
+    autoEnterDesired = autoEnter
+    if autoEnter {
+      createPipController()
+      pipController?.canStartPictureInPictureAutomaticallyFromInline = true
+    } else {
+      pipController?.canStartPictureInPictureAutomaticallyFromInline = false
+      if !(pipController?.isPictureInPictureActive ?? false) {
+        destroyPipController()
+      }
+    }
+  }
+
+  public func start(moveAppToBackground: Bool) -> Bool {
+    createPipController()
     guard let pipController = pipController else {
       return false
     }
     if pipController.isPictureInPictureActive {
+      if moveAppToBackground {
+        suspendApp()
+      }
       return true
     }
+    suspendOnStart = moveAppToBackground
     if pipController.isPictureInPicturePossible {
       NSLog("[MKPiP] starting PiP")
       pipController.startPictureInPicture()
@@ -261,6 +308,7 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
       DispatchQueue.main.asyncAfter(deadline: .now() + 3.0) { [weak self] in
         guard let that = self, that.pendingStart, !that.disposed else { return }
         that.pendingStart = false
+        that.suspendOnStart = false
         NSLog("[MKPiP] PiP still not possible 3s after start request")
         that.emit(
           "PictureInPicture.OnError",
@@ -274,7 +322,18 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
   public func stop() {
     NSLog("[MKPiP] stop")
     pendingStart = false
+    suspendOnStart = false
     pipController?.stopPictureInPicture()
+  }
+
+  // Backgrounds the app so the PiP window lands over the home screen. There is
+  // no public API for this; performing the (private) `suspend` selector on
+  // UIApplication is the widely-used workaround.
+  private func suspendApp() {
+    NSLog("[MKPiP] moving app to background")
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+      UIApplication.shared.perform(#selector(URLSessionTask.suspend))
+    }
   }
 
   public func setPlaybackState(position: Double, duration: Double, playing: Bool, rate: Double) {
@@ -368,6 +427,10 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
   ) {
     NSLog("[MKPiP] did start")
     emit("PictureInPicture.OnStateChanged", ["active": true])
+    if suspendOnStart {
+      suspendOnStart = false
+      suspendApp()
+    }
   }
 
   public func pictureInPictureControllerDidStopPictureInPicture(
@@ -375,6 +438,15 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
   ) {
     NSLog("[MKPiP] did stop")
     emit("PictureInPicture.OnStateChanged", ["active": false])
+    if !autoEnterDesired {
+      // Don't leave a controller behind for the system to auto-start.
+      DispatchQueue.main.async { [weak self] in
+        guard let that = self, !that.autoEnterDesired,
+          !(that.pipController?.isPictureInPictureActive ?? false)
+        else { return }
+        that.destroyPipController()
+      }
+    }
   }
 
   public func pictureInPictureController(
@@ -382,6 +454,7 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
     failedToStartPictureInPictureWithError error: Error
   ) {
     NSLog("[MKPiP] failed to start: %@", error.localizedDescription)
+    suspendOnStart = false
     emit("PictureInPicture.OnError", ["message": error.localizedDescription])
   }
 
