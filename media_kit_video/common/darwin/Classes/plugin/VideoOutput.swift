@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreVideo
 import Foundation
 
 #if canImport(Flutter)
@@ -6,6 +7,13 @@ import Foundation
 #elseif canImport(FlutterMacOS)
   import FlutterMacOS
 #endif
+
+// Receives every freshly rendered frame, in addition to the Flutter texture
+// registry (e.g. to feed Picture-in-Picture). Called on the worker thread;
+// implementations must be thread-safe and must not block.
+public protocol VideoOutputFrameConsumer: AnyObject {
+  func enqueue(_ pixelBuffer: CVPixelBuffer, size: CGSize)
+}
 
 // This class creates and manipulates the different types of FlutterTexture,
 // handles resizing, rendering calls, and notify Flutter when a new frame is
@@ -26,6 +34,9 @@ public class VideoOutput: NSObject {
     #endif
     return isSim
   }()
+
+  // Secondary consumer of rendered frames (e.g. Picture-in-Picture).
+  public weak var frameConsumer: VideoOutputFrameConsumer?
 
   private let handle: OpaquePointer
   private let enableHardwareAcceleration: Bool
@@ -144,6 +155,11 @@ public class VideoOutput: NSObject {
     }
   }
 
+  // The most recently rendered frame, or nil before the first render.
+  public func currentPixelBuffer() -> CVPixelBuffer? {
+    return texture?.copyPixelBuffer()?.takeRetainedValue()
+  }
+
   public func updateCallback() {
     worker.enqueue {
       self._updateCallback()
@@ -173,6 +189,13 @@ public class VideoOutput: NSObject {
     }
 
     texture.render(size)
+
+    if let consumer = frameConsumer,
+      let pixelBuffer = texture.copyPixelBuffer()?.takeRetainedValue()
+    {
+      consumer.enqueue(pixelBuffer, size: size)
+    }
+
     DispatchQueue.main.sync { [weak self] in
       guard let that = self else { return }
       // Textures must be marked as available from the main thread
