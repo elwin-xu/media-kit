@@ -51,6 +51,7 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
 
   private var pendingStart: Bool = false
   private var disposed: Bool = false
+  private var lifecycleObservers: [NSObjectProtocol] = []
 
   // Must be called on the main thread. Returns nil when no window is
   // available to host the display layer.
@@ -117,6 +118,37 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
         pipController.startPictureInPicture()
       }
     }
+
+    // Diagnostics for background playback: whether the audio session is in a
+    // state that keeps the process running, and whether frames still flow.
+    let center = NotificationCenter.default
+    lifecycleObservers.append(
+      center.addObserver(
+        forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main
+      ) { [weak self] _ in
+        self?.logLifecycleSnapshot("didEnterBackground")
+      })
+    lifecycleObservers.append(
+      center.addObserver(
+        forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+      ) { [weak self] _ in
+        self?.logLifecycleSnapshot("willEnterForeground")
+      })
+  }
+
+  private func logLifecycleSnapshot(_ tag: String) {
+    let session = AVAudioSession.sharedInstance()
+    NSLog(
+      "[MKPiP] %@: pipActive=%d possible=%d layerStatus=%ld layerError=%@ session category=%@ mode=%@ otherAudio=%d",
+      tag,
+      pipController?.isPictureInPictureActive ?? false,
+      pipController?.isPictureInPicturePossible ?? false,
+      displayLayer.status.rawValue,
+      displayLayer.error?.localizedDescription ?? "none",
+      session.category.rawValue,
+      session.mode.rawValue,
+      session.isOtherAudioPlaying
+    )
   }
 
   // MARK: - VideoOutputFrameConsumer (worker thread)
@@ -266,6 +298,9 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
       disposed = true
     }
     pendingStart = false
+    let center = NotificationCenter.default
+    lifecycleObservers.forEach { center.removeObserver($0) }
+    lifecycleObservers = []
     possibleObservation?.invalidate()
     possibleObservation = nil
     // Dropping the content source ends PiP immediately (no animation).
