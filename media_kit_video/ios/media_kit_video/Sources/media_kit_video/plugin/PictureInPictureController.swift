@@ -249,6 +249,14 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
     isPlaying = playing
     self.rate = rate
     self.duration = duration
+    // The timebase models the video timeline: its current time is the playback
+    // position and it advances at the playback rate. The PiP OSD reads
+    // progress from it (against timeRangeForPlayback) and extrapolates
+    // in-between these state pushes.
+    if let timebase = timebase {
+      CMTimebaseSetTime(timebase, time: CMTime(seconds: position, preferredTimescale: 1000))
+      CMTimebaseSetRate(timebase, rate: playing ? rate : 0.0)
+    }
     pipController?.invalidatePlaybackState()
   }
 
@@ -277,6 +285,9 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
     // Optimistically mirror so the PiP button flips immediately; Dart confirms
     // through the next setPlaybackState.
     isPlaying = playing
+    if let timebase = timebase {
+      CMTimebaseSetRate(timebase, rate: playing ? rate : 0.0)
+    }
     pictureInPictureController.invalidatePlaybackState()
     emit("PictureInPicture.OnSetPlaying", ["playing": playing])
   }
@@ -284,9 +295,15 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
   public func pictureInPictureControllerTimeRangeForPlayback(
     _ pictureInPictureController: AVPictureInPictureController
   ) -> CMTimeRange {
-    // An indefinite/finite range here is unreliable with an always-advancing
-    // timebase; [0, +inf) avoids the stuck loading indicator.
-    return CMTimeRange(start: .zero, duration: .positiveInfinity)
+    if duration <= 0 {
+      // Unknown duration (live/still loading): [0, +inf) renders as "Live"
+      // and avoids the stuck loading indicator kCMTimeIndefinite causes.
+      return CMTimeRange(start: .zero, duration: .positiveInfinity)
+    }
+    return CMTimeRange(
+      start: .zero,
+      duration: CMTime(seconds: duration, preferredTimescale: 1000)
+    )
   }
 
   public func pictureInPictureControllerIsPlaybackPaused(
