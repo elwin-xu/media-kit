@@ -12,6 +12,7 @@ import 'package:synchronized/synchronized.dart';
 
 import 'package:media_kit/media_kit.dart';
 
+import 'package:media_kit_video/src/pip/picture_in_picture.dart';
 import 'package:media_kit_video/src/utils/query_decoders.dart';
 import 'package:media_kit_video/src/video_controller/platform_video_controller.dart';
 
@@ -287,6 +288,9 @@ class NativeVideoController extends PlatformVideoController {
                   }
                 default:
                   {
+                    if (call.method.startsWith('PictureInPicture.')) {
+                      PictureInPicture.handleMethodCall(call);
+                    }
                     break;
                   }
               }
