@@ -96,14 +96,14 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
       handle, autoEnter, audioSession.category.rawValue, audioSession.mode.rawValue
     )
 
-    // Only keep an AVPictureInPictureController alive while it is wanted: the
-    // system can auto-start PiP for an existing controller when the app
-    // backgrounds, so with auto-enter off none must exist. The button path
-    // creates one on demand (see start()).
+    // The controller is kept warm while the app is active so a button start is
+    // always instant & user-initiated (a freshly created controller is not
+    // isPictureInPicturePossible for a moment, which makes a deferred start
+    // unreliable). With auto-enter off it is destroyed on willResignActive —
+    // before the system evaluates auto-PiP for the background transition — so
+    // it cannot auto-start, and recreated on didBecomeActive.
     autoEnterDesired = autoEnter
-    if autoEnter {
-      createPipController()
-    }
+    createPipController()
 
     // Diagnostics for background playback: whether the audio session is in a
     // state that keeps the process running, and whether frames still flow.
@@ -119,6 +119,25 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
         forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
       ) { [weak self] _ in
         self?.logLifecycleSnapshot("willEnterForeground")
+      })
+    lifecycleObservers.append(
+      center.addObserver(
+        forName: UIApplication.willResignActiveNotification, object: nil, queue: .main
+      ) { [weak self] _ in
+        guard let that = self else { return }
+        if !that.autoEnterDesired, !that.pendingStart,
+          !(that.pipController?.isPictureInPictureActive ?? false)
+        {
+          NSLog("[MKPiP] willResignActive with auto-enter off: destroying controller")
+          that.destroyPipController()
+        }
+      })
+    lifecycleObservers.append(
+      center.addObserver(
+        forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
+      ) { [weak self] _ in
+        guard let that = self, !that.disposed else { return }
+        that.createPipController()
       })
   }
 
@@ -275,15 +294,10 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
   public func setAutoEnter(_ autoEnter: Bool) {
     NSLog("[MKPiP] setAutoEnter=%d", autoEnter)
     autoEnterDesired = autoEnter
-    if autoEnter {
+    if UIApplication.shared.applicationState == .active {
       createPipController()
-      pipController?.canStartPictureInPictureAutomaticallyFromInline = true
-    } else {
-      pipController?.canStartPictureInPictureAutomaticallyFromInline = false
-      if !(pipController?.isPictureInPictureActive ?? false) {
-        destroyPipController()
-      }
     }
+    pipController?.canStartPictureInPictureAutomaticallyFromInline = autoEnter
   }
 
   public func start(moveAppToBackground: Bool) -> Bool {
@@ -439,10 +453,13 @@ public class PictureInPictureController: NSObject, VideoOutputFrameConsumer,
     NSLog("[MKPiP] did stop")
     emit("PictureInPicture.OnStateChanged", ["active": false])
     if !autoEnterDesired {
-      // Don't leave a controller behind for the system to auto-start.
+      // If PiP ended while the app is backgrounded (auto-enter off), don't
+      // leave a controller behind; in the foreground it stays warm and
+      // willResignActive handles the next background transition.
       DispatchQueue.main.async { [weak self] in
         guard let that = self, !that.autoEnterDesired,
-          !(that.pipController?.isPictureInPictureActive ?? false)
+          !(that.pipController?.isPictureInPictureActive ?? false),
+          UIApplication.shared.applicationState != .active
         else { return }
         that.destroyPipController()
       }
