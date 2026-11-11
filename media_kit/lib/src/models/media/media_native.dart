@@ -142,6 +142,20 @@ class Media extends Playable {
     return instance;
   }
 
+  /// Opens an Android content:// [uri]'s file descriptor on a background isolate.
+  ///
+  /// [Media] opens it synchronously otherwise, on the calling isolate; a slow provider then blocks the UI thread.
+  static Future<void> prepareUri(String uri) async {
+    try {
+      if (Platform.isAndroid && Uri.parse(uri).isScheme('CONTENT')) {
+        await AndroidContentUriProvider.openFileDescriptor(uri);
+      }
+    } catch (exception, stacktrace) {
+      print(exception);
+      print(stacktrace);
+    }
+  }
+
   /// Normalizes the passed URI.
   static String normalizeURI(String uri) {
     if (uri.startsWith(_kAssetScheme)) {

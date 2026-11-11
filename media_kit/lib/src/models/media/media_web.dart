@@ -122,6 +122,9 @@ class Media extends Playable {
     return Future.value(instance);
   }
 
+  /// No-op on web; see the native [Media.prepareUri].
+  static Future<void> prepareUri(String uri) => Future.value();
+
   /// Normalizes the passed URI.
   static String normalizeURI(String uri) {
     if (uri.startsWith(_kAssetScheme)) {

@@ -4,6 +4,7 @@
 /// All rights reserved.
 /// Use of this source code is governed by MIT license that can be found in the LICENSE file.
 import 'dart:ffi';
+import 'dart:io';
 
 import 'package:media_kit/generated/libmpv/bindings.dart' as generated;
 import 'package:media_kit/src/player/native/core/execmem_restriction.dart';
@@ -33,12 +34,16 @@ class Initializer {
   /// Generated libmpv C API bindings.
   final generated.MPV mpv;
 
+  /// Android waits on mpv in its own isolate: Flutter runs the UI isolate on the main thread, so a
+  /// [InitializerNativeCallable] drain stuck in `mpv_wait_event` there is an ANR.
+  static final bool _useIsolate = isExecmemRestricted || Platform.isAndroid;
+
   /// Creates [Pointer<mpv_handle>].
   Future<Pointer<generated.mpv_handle>> create(
     Future<void> Function(Pointer<generated.mpv_event>) callback, {
     Map<String, String> options = const {},
   }) async {
-    if (!isExecmemRestricted) {
+    if (!_useIsolate) {
       return InitializerNativeCallable(mpv).create(callback, options: options);
     } else {
       return InitializerIsolate().create(callback, options: options);
@@ -47,7 +52,7 @@ class Initializer {
 
   /// Disposes [Pointer<mpv_handle>].
   void dispose(Pointer<generated.mpv_handle> ctx) {
-    if (!isExecmemRestricted) {
+    if (!_useIsolate) {
       InitializerNativeCallable(mpv).dispose(ctx);
     } else {
       InitializerIsolate().dispose(mpv, ctx);
