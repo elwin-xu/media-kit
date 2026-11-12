@@ -8,6 +8,47 @@
   import AVKit
 #endif
 
+// Whether the Flutter engine behind a registrar can still take texture-registry
+// and channel calls. Main thread only.
+//
+// When iOS discards a backgrounded scene, or the user closes the window of the
+// iPad app running on a Mac, the FlutterViewController is deallocated and a
+// non-headless engine destroys its shell (-[FlutterEngine destroyContext]). The
+// FlutterEngine object lives on, and textureFrameAvailable:, registerTexture:,
+// unregisterTexture: and sendOnChannel: all dereference the missing shell.
+// Background audio keeps the process and mpv running, so frames keep arriving
+// and the next one crashed with EXC_BAD_ACCESS in textureFrameAvailable:.
+final class EngineLiveness {
+  #if os(iOS)
+    private weak var registrar: FlutterPluginRegistrar?
+    private weak var engine: FlutterEngine?
+    private var sawEngine = false
+  #endif
+
+  init(registrar: FlutterPluginRegistrar) {
+    #if os(iOS)
+      self.registrar = registrar
+    #endif
+  }
+
+  var isAlive: Bool {
+    #if os(iOS)
+      if let engine = (registrar?.viewController as? FlutterViewController)?.engine {
+        self.engine = engine
+        sawEngine = true
+      }
+      // An engine never seen behind a view controller (headless) keeps the old
+      // behaviour.
+      guard sawEngine else { return true }
+      // destroyContext clears isolateId right before it resets the shell; a
+      // deallocated engine reads as nil too.
+      return engine?.isolateId != nil
+    #else
+      return true
+    #endif
+  }
+}
+
 public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
   private static let CHANNEL_NAME = "com.alexmercerind/media_kit_video"
 
@@ -29,7 +70,8 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
     let instance = MediaKitVideoPlugin(
       registry: registry,
       channel: channel,
-      utils: utils
+      utils: utils,
+      engineLiveness: EngineLiveness(registrar: registrar)
     )
     registrar.addMethodCallDelegate(instance, channel: channel)
   }
@@ -37,6 +79,7 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
   private let channel: FlutterMethodChannel
   private let videoOutputManager: VideoOutputManager
   private let utils: UtilsProtocol?
+  private let engineLiveness: EngineLiveness
 
   #if os(iOS)
     // Values are PictureInPictureController (iOS 15+); typed as NSObject so the
@@ -47,13 +90,16 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
   init(
     registry: FlutterTextureRegistry,
     channel: FlutterMethodChannel,
-    utils: UtilsProtocol?
+    utils: UtilsProtocol?,
+    engineLiveness: EngineLiveness
   ) {
     self.channel = channel
     videoOutputManager = VideoOutputManager(
-      registry: registry
+      registry: registry,
+      engineLiveness: engineLiveness
     )
     self.utils = utils
+    self.engineLiveness = engineLiveness
   }
 
   public func handle(
@@ -144,7 +190,8 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
           handle: handle,
           autoEnter: autoEnter,
           emitEvent: { [weak self] method, arguments in
-            self?.channel.invokeMethod(method, arguments: arguments)
+            guard let self = self, self.engineLiveness.isAlive else { return }
+            self.channel.invokeMethod(method, arguments: arguments)
           }
         )
       else {
@@ -237,6 +284,7 @@ public class MediaKitVideoPlugin: NSObject, FlutterPlugin {
       handle: handle!,
       configuration: configuration,
       textureUpdateCallback: { (_ textureId: Int64, _ size: CGSize) in
+        // VideoOutput only calls this while the engine is alive.
         self.channel.invokeMethod(
           "VideoOutput.Resize",
           arguments: [

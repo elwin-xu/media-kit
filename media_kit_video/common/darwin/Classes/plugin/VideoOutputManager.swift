@@ -6,10 +6,12 @@
 
 public class VideoOutputManager: NSObject {
   private let registry: FlutterTextureRegistry
+  private let engineLiveness: EngineLiveness
   private var videoOutputs = [Int64: VideoOutput]()
 
-  init(registry: FlutterTextureRegistry) {
+  init(registry: FlutterTextureRegistry, engineLiveness: EngineLiveness) {
     self.registry = registry
+    self.engineLiveness = engineLiveness
   }
 
   public func create(
@@ -21,6 +23,7 @@ public class VideoOutputManager: NSObject {
       handle: handle,
       configuration: configuration,
       registry: self.registry,
+      engineLiveness: self.engineLiveness,
       textureUpdateCallback: textureUpdateCallback
     )
 

@@ -41,6 +41,8 @@ public class VideoOutput: NSObject {
   private let handle: OpaquePointer
   private let enableHardwareAcceleration: Bool
   private let registry: FlutterTextureRegistry
+  // Checked on the main thread before every registry or channel call.
+  private let engineLiveness: EngineLiveness
   private let textureUpdateCallback: TextureUpdateCallback
   private let worker: Worker = .init()
   private var width: Int64?
@@ -54,6 +56,7 @@ public class VideoOutput: NSObject {
     handle: Int64,
     configuration: VideoOutputConfiguration,
     registry: FlutterTextureRegistry,
+    engineLiveness: EngineLiveness,
     textureUpdateCallback: @escaping TextureUpdateCallback
   ) {
     let handle = OpaquePointer(bitPattern: Int(handle))
@@ -64,6 +67,7 @@ public class VideoOutput: NSObject {
     height = configuration.height
     enableHardwareAcceleration = configuration.enableHardwareAcceleration
     self.registry = registry
+    self.engineLiveness = engineLiveness
     self.textureUpdateCallback = textureUpdateCallback
 
     super.init()
@@ -139,6 +143,7 @@ public class VideoOutput: NSObject {
 
   // Must be run on the main thread
   private func registerTextureId() {
+    guard !disposed, engineLiveness.isAlive else { return }
     // Textures must be registered on the platform thread.
     textureId = registry.register(texture)
     // textureUpdateCallback must run on the main thread
@@ -147,12 +152,22 @@ public class VideoOutput: NSObject {
 
   private func disposeTextureId() {
     let registry_ = self.registry
+    let engineLiveness_ = self.engineLiveness
     let textureId_ = self.textureId
     textureId = -1
+    if textureId_ == -1 {
+      return
+    }
     DispatchQueue.main.async {
+      guard engineLiveness_.isAlive else { return }
       // Textures must be unregistered on the platform thread
       registry_.unregisterTexture(textureId_)
     }
+  }
+
+  // Main thread only: whether a registry or channel call is safe right now.
+  private var canNotifyFlutter: Bool {
+    return !disposed && textureId != -1 && engineLiveness.isAlive
   }
 
   // The most recently rendered frame, or nil before the first render.
@@ -178,7 +193,7 @@ public class VideoOutput: NSObject {
 
       texture.resize(size)
       DispatchQueue.main.sync { [weak self] in
-        guard let that = self else { return }
+        guard let that = self, that.canNotifyFlutter else { return }
         // textureUpdateCallback must run on the main thread
         that.textureUpdateCallback(that.textureId, size)
       }
@@ -197,7 +212,7 @@ public class VideoOutput: NSObject {
     }
 
     DispatchQueue.main.sync { [weak self] in
-      guard let that = self else { return }
+      guard let that = self, that.canNotifyFlutter else { return }
       // Textures must be marked as available from the main thread
       that.registry.textureFrameAvailable(that.textureId)
     }
